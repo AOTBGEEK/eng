@@ -34,6 +34,12 @@ const char* password = "كلمة_المرور";
 #define BUZZER_PIN 26
 #define FAN_PIN 27
 
+// منافذ نظام الطاقة الشمسية
+#define VOLTAGE_SENSOR_PIN 32
+#define SOLAR_LED_PIN 33
+#define BATTERY_LED_PIN 34
+#define SYSTEM_LED_PIN 35
+
 // إعداد الحساسات
 DHT dht(DHT_PIN, DHT22);
 Servo windowServo;
@@ -60,6 +66,14 @@ struct SmartHome {
   bool light2;
   bool cooling;
   bool gasAlert;
+  
+  // نظام الطاقة الشمسية
+  float batteryVoltage;
+  int batteryPercentage;
+  bool solarCharging;
+  bool lowBattery;
+  String powerSource;
+  
   unsigned long uptime;
 } homeStatus;
 
@@ -91,6 +105,7 @@ void loop() {
   processLighting();
   processSecurity();
   processGasDetection();
+  processPowerManagement();
   
   // تحديث العرض
   updateDisplay();
@@ -107,6 +122,7 @@ void setupPins() {
   pinMode(PIR_PIN_2, INPUT);
   pinMode(GAS_PIN, INPUT);
   pinMode(ULTRASONIC_ECHO, INPUT);
+  pinMode(VOLTAGE_SENSOR_PIN, INPUT);
   
   // منافذ الإخراج
   pinMode(LED_PIN_1, OUTPUT);
@@ -114,6 +130,11 @@ void setupPins() {
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(FAN_PIN, OUTPUT);
   pinMode(ULTRASONIC_TRIG, OUTPUT);
+  
+  // مؤشرات نظام الطاقة
+  pinMode(SOLAR_LED_PIN, OUTPUT);
+  pinMode(BATTERY_LED_PIN, OUTPUT);
+  pinMode(SYSTEM_LED_PIN, OUTPUT);
 }
 
 void setupComponents() {
@@ -137,6 +158,10 @@ void readSensors() {
   homeStatus.gasLevel = map(analogRead(GAS_PIN), 0, 4095, 0, 100);
   homeStatus.motion1 = digitalRead(PIR_PIN_1);
   homeStatus.motion2 = digitalRead(PIR_PIN_2);
+  
+  // قراءة نظام الطاقة الشمسية
+  readBatteryStatus();
+  
   homeStatus.uptime = millis() / 1000;
 }
 
@@ -226,20 +251,69 @@ void emergencyProtocol() {
 
 void updateDisplay() {
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("T:");
-  lcd.print(homeStatus.temperature, 1);
-  lcd.print("C H:");
-  lcd.print(homeStatus.humidity, 0);
-  lcd.print("%");
   
-  lcd.setCursor(0, 1);
-  if (homeStatus.gasAlert) {
-    lcd.print("خطر! غاز مكتشف");
-  } else if (homeStatus.motion1 || homeStatus.motion2) {
-    lcd.print("حركة مكتشفة");
-  } else {
-    lcd.print("النظام آمن");
+  // عرض دوري للمعلومات
+  static int displayMode = 0;
+  static unsigned long lastChange = 0;
+  
+  if (millis() - lastChange > 3000) { // تغيير كل 3 ثوان
+    lastChange = millis();
+    displayMode = (displayMode + 1) % 3;
+  }
+  
+  switch (displayMode) {
+    case 0: // معلومات المناخ
+      lcd.setCursor(0, 0);
+      lcd.print("T:");
+      lcd.print(homeStatus.temperature, 1);
+      lcd.print("C H:");
+      lcd.print(homeStatus.humidity, 0);
+      lcd.print("%");
+      
+      lcd.setCursor(0, 1);
+      if (homeStatus.gasAlert) {
+        lcd.print("خطر! غاز مكتشف");
+      } else if (homeStatus.motion1 || homeStatus.motion2) {
+        lcd.print("حركة مكتشفة");
+      } else {
+        lcd.print("النظام آمن");
+      }
+      break;
+      
+    case 1: // معلومات الطاقة
+      lcd.setCursor(0, 0);
+      lcd.print("طاقة:");
+      lcd.print(homeStatus.powerSource);
+      lcd.print(" ");
+      lcd.print(homeStatus.batteryPercentage);
+      lcd.print("%");
+      
+      lcd.setCursor(0, 1);
+      lcd.print("جهد:");
+      lcd.print(homeStatus.batteryVoltage, 1);
+      lcd.print("V ");
+      if (homeStatus.solarCharging) {
+        lcd.print("شحن");
+      } else if (homeStatus.lowBattery) {
+        lcd.print("منخفض!");
+      } else {
+        lcd.print("جيد");
+      }
+      break;
+      
+    case 2: // إحصائيات النظام
+      lcd.setCursor(0, 0);
+      lcd.print("تشغيل:");
+      lcd.print(homeStatus.uptime / 3600); // ساعات
+      lcd.print("h ");
+      lcd.print((homeStatus.uptime % 3600) / 60); // دقائق
+      lcd.print("m");
+      
+      lcd.setCursor(0, 1);
+      lcd.print("استهلاك:");
+      lcd.print(calculatePowerConsumption());
+      lcd.print("mA");
+      break;
   }
 }
 
@@ -302,6 +376,128 @@ void warningBeep() {
   digitalWrite(BUZZER_PIN, HIGH);
   delay(100);
   digitalWrite(BUZZER_PIN, LOW);
+}
+
+// وظائف نظام الطاقة الشمسية ☀️🔋
+
+void readBatteryStatus() {
+  // قراءة جهد البطارية عبر مقسم الجهد
+  int voltageReading = analogRead(VOLTAGE_SENSOR_PIN);
+  homeStatus.batteryVoltage = (voltageReading * 3.3 / 4095) * 2.0; // مضاعف 2 للمقسم
+  
+  // حساب نسبة الشحن (16.8V = 100%, 12.4V = 0%)
+  homeStatus.batteryPercentage = map(homeStatus.batteryVoltage * 100, 1240, 1680, 0, 100);
+  homeStatus.batteryPercentage = constrain(homeStatus.batteryPercentage, 0, 100);
+  
+  // تحديد حالة البطارية
+  homeStatus.lowBattery = (homeStatus.batteryPercentage < 20);
+  homeStatus.solarCharging = (homeStatus.batteryVoltage > 15.5); // إذا كان الجهد مرتفع = شحن شمسي
+  
+  // تحديد مصدر الطاقة
+  if (homeStatus.solarCharging) {
+    homeStatus.powerSource = "شمسي";
+  } else if (homeStatus.batteryPercentage > 30) {
+    homeStatus.powerSource = "بطارية";  
+  } else {
+    homeStatus.powerSource = "طوارئ";
+  }
+}
+
+void processPowerManagement() {
+  // إدارة مؤشرات LED للطاقة
+  if (homeStatus.solarCharging) {
+    // الطاقة الشمسية متوفرة - LED أخضر
+    digitalWrite(SOLAR_LED_PIN, HIGH);
+    digitalWrite(BATTERY_LED_PIN, LOW);
+    digitalWrite(SYSTEM_LED_PIN, LOW);
+    
+  } else if (homeStatus.batteryPercentage > 20) {
+    // يعمل بالبطارية - LED أزرق
+    digitalWrite(SYSTEM_LED_PIN, HIGH);
+    digitalWrite(BATTERY_LED_PIN, LOW);
+    digitalWrite(SOLAR_LED_PIN, LOW);
+    
+  } else {
+    // بطارية منخفضة - LED أحمر يرمش
+    static unsigned long lastBlink = 0;
+    if (millis() - lastBlink > 500) {
+      lastBlink = millis();
+      digitalWrite(BATTERY_LED_PIN, !digitalRead(BATTERY_LED_PIN));
+    }
+    digitalWrite(SOLAR_LED_PIN, LOW);
+    digitalWrite(SYSTEM_LED_PIN, LOW);
+  }
+  
+  // وضع توفير الطاقة عند انخفاض البطارية
+  if (homeStatus.lowBattery) {
+    energySavingMode();
+  }
+}
+
+void energySavingMode() {
+  static bool energyModeActive = false;
+  
+  if (!energyModeActive) {
+    energyModeActive = true;
+    Serial.println("🔋 تفعيل وضع توفير الطاقة!");
+    
+    // تقليل سطوع الإضاءة أو إيقافها
+    digitalWrite(LED_PIN_1, LOW);
+    digitalWrite(LED_PIN_2, LOW);
+    
+    // إيقاف المراوح غير الضرورية
+    if (!homeStatus.gasAlert) {
+      digitalWrite(FAN_PIN, LOW);
+    }
+    
+    // تحديث الشاشة بتكرار أقل
+    // سيتم تطبيق هذا في updateDisplay()
+  }
+  
+  // إنذار البطارية المنخفضة
+  static unsigned long lastWarning = 0;
+  if (millis() - lastWarning > 30000) { // كل 30 ثانية
+    lastWarning = millis();
+    lowBatteryAlert();
+  }
+}
+
+void lowBatteryAlert() {
+  // صوت تحذير خفيف للبطارية المنخفضة
+  for (int i = 0; i < 2; i++) {
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(100);
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(100);
+  }
+  Serial.println("⚠️ تحذير: البطارية منخفضة " + String(homeStatus.batteryPercentage) + "%");
+}
+
+void solarDataLogging() {
+  // تسجيل بيانات الطاقة الشمسية للتحليل
+  static unsigned long lastLog = 0;
+  
+  if (millis() - lastLog > 60000) { // كل دقيقة
+    lastLog = millis();
+    
+    Serial.println("📊 سجل الطاقة:");
+    Serial.println("   🔋 جهد البطارية: " + String(homeStatus.batteryVoltage) + "V");
+    Serial.println("   📊 نسبة الشحن: " + String(homeStatus.batteryPercentage) + "%");
+    Serial.println("   ☀️ مصدر الطاقة: " + homeStatus.powerSource);
+    Serial.println("   ⚡ استهلاك النظام: " + calculatePowerConsumption() + "mA");
+  }
+}
+
+String calculatePowerConsumption() {
+  // حساب تقريبي لاستهلاك النظام
+  int consumption = 50; // ESP32 base consumption
+  
+  if (homeStatus.light1) consumption += 20;
+  if (homeStatus.light2) consumption += 20;  
+  if (homeStatus.cooling) consumption += 150;
+  if (digitalRead(BUZZER_PIN)) consumption += 30;
+  
+  return String(consumption);
 }
 ```
 
